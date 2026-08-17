@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ScatterChart, Scatter, ZAxis, Legend,
@@ -359,6 +359,42 @@ export default function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ------------------------------------------------------------------------
+  // BROWSER BACK/FORWARD SUPPORT
+  // Keeps the URL hash in sync with the current screen so the browser's
+  // back/forward buttons navigate within the app instead of leaving it.
+  // ------------------------------------------------------------------------
+  const isFirstHistoryRender = useRef(true);
+  const userRef = useRef(user);
+  userRef.current = user;
+
+  useEffect(() => {
+    function handlePopState(e) {
+      const requested = (e.state && e.state.view) || (window.location.hash ? window.location.hash.slice(1) : "landing");
+      if (!requested || requested === view) return;
+      const isPublic = requested === "landing" || requested === "auth";
+      if (!userRef.current && !isPublic) {
+        setView("landing");
+      } else {
+        setView(requested);
+      }
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  useEffect(() => {
+    if (isFirstHistoryRender.current) {
+      isFirstHistoryRender.current = false;
+      window.history.replaceState({ view }, "", "#" + view);
+      return;
+    }
+    if (window.location.hash.slice(1) !== view) {
+      window.history.pushState({ view }, "", "#" + view);
+    }
+  }, [view]);
 
   const recompute = useCallback((list, exam = examDate) => {
     return list.map(t => {
