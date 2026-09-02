@@ -90,17 +90,17 @@ function computePriority(f, today = new Date()) {
   const practiceGap = clamp(100 - Math.min(f.revisionCount ?? 0, 6) * 16.6, 0, 100);
 
   const weighted =
-    weakMarks * 0.22 +
-    lowConfidence * 0.18 +
-    examUrgency * 0.16 +
-    staleness * 0.14 +
-    difficultyScore * 0.10 +
-    weightageScore * 0.10 +
+    weakMarks * 0.26 +
+    lowConfidence * 0.22 +
+    examUrgency * 0.14 +
+    staleness * 0.12 +
+    difficultyScore * 0.08 +
+    weightageScore * 0.08 +
     errorRate * 0.06 +
     practiceGap * 0.04;
 
   const score = Math.round(clamp(weighted, 0, 100));
-  const level = score >= 75 ? "HIGH" : score >= 45 ? "MEDIUM" : "LOW";
+  const level = score >= 70 ? "HIGH" : score >= 42 ? "MEDIUM" : "LOW";
 
   const reasons = [];
   if (f.marksPercentage < 60) reasons.push(`Your previous score is low (${f.marksPercentage}%)`);
@@ -121,6 +121,37 @@ function computePriority(f, today = new Date()) {
 }
 
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+
+/**
+ * assignRelativeLevels
+ * Re-checks HIGH/MEDIUM/LOW using each topic's rank among the student's own
+ * topics, not just a fixed absolute cutoff. This is what keeps topics spread
+ * across all three buckets instead of clustering into one — the student with
+ * a mild set of topics still sees their relatively weakest ones flagged HIGH,
+ * and a student with many urgent topics still sees their relatively safest
+ * ones flagged LOW. Sane floors/ceilings stop this from mislabeling topics
+ * that are genuinely all fine (or all urgent).
+ */
+function assignRelativeLevels(list) {
+  if (list.length < 4) return list; // too few topics for percentiles to mean anything
+  const n = list.length;
+  const highCount = Math.max(1, Math.round(n * 0.3));
+  const lowCount = Math.max(1, Math.round(n * 0.3));
+  // Rank topics by score (stable order for ties), then only the topics that
+  // actually land in the top/bottom slice qualify — ties beyond that slice
+  // don't all inherit the label the way a shared score-threshold would.
+  const order = list.map((_, i) => i).sort((a, b) => list[b].score - list[a].score || a - b);
+  const levels = new Array(n).fill("MEDIUM");
+  for (let k = 0; k < highCount; k++) {
+    const idx = order[k];
+    if (list[idx].score >= 55) levels[idx] = "HIGH"; // still needs to be genuinely elevated
+  }
+  for (let k = 0; k < lowCount; k++) {
+    const idx = order[n - 1 - k];
+    if (list[idx].score < 45) levels[idx] = "LOW"; // still needs to be genuinely low
+  }
+  return list.map((t, i) => ({ ...t, level: levels[i] }));
+}
 
 const LEVEL_COLOR = { HIGH: T.high, MEDIUM: T.medium, LOW: T.low };
 const LEVEL_SOFT = { HIGH: T.highSoft, MEDIUM: T.mediumSoft, LOW: T.lowSoft };
@@ -397,10 +428,11 @@ export default function App() {
   }, [view]);
 
   const recompute = useCallback((list, exam = examDate) => {
-    return list.map(t => {
+    const scored = list.map(t => {
       const r = computePriority({ ...t, examDate: exam });
       return { ...t, score: r.score, level: r.level, reasons: r.reasons, daysUntilExam: r.daysUntilExam, daysSinceRevision: r.daysSinceRevision };
     });
+    return assignRelativeLevels(scored);
   }, [examDate]);
 
   function loadDemoData() {
