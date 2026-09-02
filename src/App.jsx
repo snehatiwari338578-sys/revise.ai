@@ -1,13 +1,13 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  ScatterChart, Scatter, ZAxis, Legend,
+  ScatterChart, Scatter, ZAxis, Legend, LineChart, Line,
 } from "recharts";
 import {
   Home, BookOpen, Flame, CalendarDays, ClipboardList, BarChart3, Sparkles,
   Settings, Menu, X, ChevronRight, Plus, Search, ArrowUpDown, Filter,
   CheckCircle2, Circle, RotateCcw, Play, Clock, TrendingUp, TrendingDown,
-  AlertTriangle, Target, Trophy, LogOut, Moon, Sun, Trash2, Pencil,
+  AlertTriangle, Target, Trophy, LogOut, Moon, Sun, Trash2, Pencil, LayoutGrid,
 } from "lucide-react";
 import * as db from "./db";
 import { supabaseEnabled } from "./supabaseClient";
@@ -123,6 +123,46 @@ function computePriority(f, today = new Date()) {
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 
 /**
+ * computeStreaks
+ * Takes a list of date strings (YYYY-MM-DD) representing days the student
+ * did something real — revised a topic or completed a quiz — and returns
+ * the current and best consecutive-day streaks. Grounded entirely in real
+ * activity dates already stored on topics/quiz history, nothing synthetic.
+ */
+function computeStreaks(dateStrings) {
+  const days = [...new Set(dateStrings.filter(Boolean))].sort();
+  if (days.length === 0) return { current: 0, best: 0 };
+  const daySet = new Set(days);
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  function stepBack(dateStr, n) {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() - n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  // Current streak: count backward from today (or yesterday, if nothing
+  // logged yet today so the streak doesn't reset to 0 before the day ends).
+  let anchor = daySet.has(todayStr) ? todayStr : stepBack(todayStr, 1);
+  let current = 0;
+  while (daySet.has(anchor)) {
+    current += 1;
+    anchor = stepBack(anchor, 1);
+  }
+
+  // Best streak: longest run of consecutive calendar days anywhere in history.
+  let best = 1, run = 1;
+  for (let i = 1; i < days.length; i++) {
+    const prev = new Date(days[i - 1]);
+    const cur = new Date(days[i]);
+    const diff = Math.round((cur - prev) / 86400000);
+    run = diff === 1 ? run + 1 : 1;
+    best = Math.max(best, run);
+  }
+  return { current, best: Math.max(best, current) };
+}
+
+/**
  * assignRelativeLevels
  * Re-checks HIGH/MEDIUM/LOW using each topic's rank among the student's own
  * topics, not just a fixed absolute cutoff. This is what keeps topics spread
@@ -213,10 +253,11 @@ function Badge({ level, size = "md" }) {
   );
 }
 
-function Card({ children, style, onClick, dark }) {
+function Card({ children, style, onClick, dark, className }) {
   return (
     <div
       onClick={onClick}
+      className={className}
       style={{
         background: dark ? T.surfaceDark : T.surface,
         border: `1px solid ${dark ? T.lineDark : T.line}`,
@@ -344,6 +385,7 @@ export default function App() {
   const [examDate, setExamDate] = useState(daysFromNow(7));
   const [subjects, setSubjects] = useState([]);
   const [topics, setTopics] = useState([]);
+  const [quizHistory, setQuizHistory] = useState([]); // { id, topicId, topicName, date, scorePercent }
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [selectedTopicId, setSelectedTopicId] = useState(null);
@@ -615,6 +657,10 @@ export default function App() {
       incorrectAnswers: incorrect, marksPercentage: newMarks, confidenceLevel: newConfidence,
       lastRevision: new Date().toISOString().slice(0,10), revisionCount: (t.revisionCount||0) + 1,
     });
+    setQuizHistory(prev => [...prev, {
+      id: uid(), topicId: id, topicName: `${t.subjectName} → ${t.name}`,
+      date: new Date().toISOString().slice(0,10), scorePercent: Math.round((correct/total)*100),
+    }]);
     if (supabaseEnabled && authUserId) {
       db.recordQuizResult(authUserId, id, correct, total, incorrect).catch(err => console.error(err));
     }
@@ -627,6 +673,7 @@ export default function App() {
   const medTopics = topics.filter(t => t.level === "MEDIUM").sort((a,b) => b.score - a.score);
   const lowTopics = topics.filter(t => t.level === "LOW").sort((a,b) => b.score - a.score);
   const avgPrep = topics.length ? Math.round(topics.reduce((s,t)=>s + (100 - t.score), 0) / topics.length) : 0;
+  const streak = computeStreaks([...topics.map(t => t.lastRevision), ...quizHistory.map(q => q.date)]);
 
   const isAuthed = !!user;
 
@@ -645,7 +692,9 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", icon: Home },
     { id: "subjects", label: "Subjects", icon: BookOpen },
     { id: "priority", label: "Priority Topics", icon: Flame },
-    { id: "plan", label: "Revision Plan", icon: CalendarDays },
+    { id: "matrix", label: "Priority Matrix", icon: LayoutGrid },
+    { id: "plan", label: "Revision Plan", icon: Clock },
+    { id: "calendar", label: "Exam Calendar", icon: CalendarDays },
     { id: "quizzes", label: "Quizzes", icon: ClipboardList },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "insights", label: "AI Insights", icon: Sparkles },
@@ -731,6 +780,7 @@ export default function App() {
               addTopic={addTopic} updateTopic={updateTopic} deleteTopic={deleteTopic} markRevised={markRevised}
               submitQuiz={submitQuiz} loading={loading} loadDemoData={loadDemoData}
               examDate={examDate} setExamDate={setExamDate} showToast={showToast}
+              streak={streak} quizHistory={quizHistory}
             />
           </div>
         </div>
@@ -773,54 +823,96 @@ function NavRow({ item, active, onClick }) {
 function Landing({ onGetStarted, onDemo }) {
   useFontLoader();
   return (
-    <div style={{ fontFamily: FONT_BODY, background: T.bg, minHeight: "100vh", color: T.ink }}>
-      <style>{`* { box-sizing: border-box; }`}</style>
-      <div style={{ maxWidth: 1120, margin: "0 auto", padding: "24px 20px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 9, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Sparkles size={16} color="#fff" />
+    <div style={{ fontFamily: FONT_BODY, background: T.bg, minHeight: "100vh", color: T.ink, position: "relative", overflow: "hidden" }}>
+      <style>{`* { box-sizing: border-box; }
+        @keyframes floatBlob { 0%,100%{ transform: translateY(0); } 50%{ transform: translateY(-14px); } }
+        .priority-row { transition: transform .15s, box-shadow .15s; }
+        .priority-row:hover { transform: translateX(2px); }
+        .feat-card { transition: transform .18s, box-shadow .18s, border-color .18s; }
+        .feat-card:hover { transform: translateY(-4px); box-shadow: 0 14px 34px rgba(15,23,41,0.10); border-color: transparent; }
+      `}</style>
+
+      {/* ambient background blobs */}
+      <div style={{ position: "absolute", top: -160, right: -160, width: 480, height: 480, borderRadius: "50%", background: `radial-gradient(circle, ${T.primarySoft} 0%, transparent 70%)`, filter: "blur(4px)", animation: "floatBlob 9s ease-in-out infinite", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", top: 420, left: -200, width: 420, height: 420, borderRadius: "50%", background: `radial-gradient(circle, ${T.accentSoft ?? "#ECEDFD"} 0%, transparent 70%)`, filter: "blur(4px)", animation: "floatBlob 11s ease-in-out infinite 1s", pointerEvents: "none" }} />
+
+      <div style={{ maxWidth: 1120, margin: "0 auto", padding: "24px 20px", position: "relative" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 9, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 4px 14px ${T.primary}55` }}>
+              <Sparkles size={16} color="#fff" />
+            </div>
+            <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18 }}>ReviseAI</span>
           </div>
-          <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18 }}>ReviseAI</span>
+          <div style={{ fontSize: 12.5, color: T.muted, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }} className="desktop-only">
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: T.low }} /> Live demo available
+          </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 40, alignItems: "center", marginTop: 56 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 40, alignItems: "center", marginTop: 60 }}>
           <div style={{ gridColumn: "span 2" }} className="hero-col">
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: T.primarySoft, color: T.primary, padding: "5px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, marginBottom: 20 }}>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 6, background: T.primarySoft, color: T.primary,
+              padding: "5px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, marginBottom: 22,
+              border: `1px solid ${T.primary}22`,
+            }}>
               <Target size={13} /> AI Revision Priority Engine
             </div>
-            <h1 style={{ fontFamily: FONT_HEAD, fontSize: "clamp(32px, 5vw, 54px)", fontWeight: 800, lineHeight: 1.08, letterSpacing: -1, margin: 0, maxWidth: 720 }}>
-              Stop wondering what to study. Let AI prioritize it.
+            <h1 style={{ fontFamily: FONT_HEAD, fontSize: "clamp(32px, 5vw, 56px)", fontWeight: 800, lineHeight: 1.06, letterSpacing: -1.2, margin: 0, maxWidth: 740 }}>
+              Stop wondering what to study.{" "}
+              <span style={{ color: T.primary, position: "relative" }}>
+                Let AI prioritize it.
+              </span>
             </h1>
-            <p style={{ fontSize: 17, color: T.muted, marginTop: 18, maxWidth: 560, lineHeight: 1.6 }}>
+            <p style={{ fontSize: 17.5, color: T.muted, marginTop: 20, maxWidth: 560, lineHeight: 1.65 }}>
               ReviseAI analyzes your performance, confidence, exam schedule and revision history to create a personalized revision priority plan.
             </p>
-            <div style={{ display: "flex", gap: 12, marginTop: 28, flexWrap: "wrap" }}>
-              <Button onClick={onGetStarted} style={{ padding: "12px 22px", fontSize: 15 }}>Get Started <ChevronRight size={16} /></Button>
-              <Button variant="ghost" onClick={onDemo} style={{ padding: "12px 22px", fontSize: 15 }}>View Demo</Button>
+            <div style={{ display: "flex", gap: 12, marginTop: 30, flexWrap: "wrap", alignItems: "center" }}>
+              <Button onClick={onGetStarted} style={{ padding: "13px 24px", fontSize: 15.5, boxShadow: `0 10px 24px ${T.primary}40` }}>Get Started <ChevronRight size={16} /></Button>
+              <Button variant="ghost" onClick={onDemo} style={{ padding: "13px 24px", fontSize: 15.5 }}>View Demo</Button>
             </div>
-            <p style={{ fontSize: 12.5, color: T.muted, marginTop: 10 }}>Study smarter. Revise what matters first.</p>
+            <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 22, flexWrap: "wrap" }}>
+              {["Explainable scoring", "Real-time recalculation", "Free to try"].map((t, i) => (
+                <span key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.muted, fontWeight: 600 }}>
+                  <CheckCircle2 size={13} color={T.low} /> {t}
+                </span>
+              ))}
+            </div>
           </div>
         </div>
 
         {/* Dashboard preview */}
-        <Card style={{ marginTop: 48, padding: 0, overflow: "hidden", boxShadow: "0 20px 60px rgba(15,23,41,0.10)" }}>
-          <div style={{ background: T.ink, color: "#fff", padding: "12px 20px", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, letterSpacing: 0.4, display: "flex", alignItems: "center", gap: 8 }}>
-            <Flame size={14} color={T.high} /> REVISION PRIORITY
+        <Card style={{ marginTop: 52, padding: 0, overflow: "hidden", boxShadow: "0 24px 70px rgba(15,23,41,0.14)", border: "none" }}>
+          <div style={{
+            background: `linear-gradient(135deg, ${T.ink} 0%, #1A2333 100%)`, color: "#fff", padding: "16px 22px",
+            fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, letterSpacing: 0.6,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Flame size={14} color={T.high} /> REVISION PRIORITY
+            </span>
+            <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: 0.4, color: "#9AA3B2" }}>LIVE PREVIEW</span>
           </div>
-          <div style={{ padding: 8 }}>
+          <div style={{ padding: "10px 8px" }}>
             {[
               { s: "DSA → Graphs", v: 94, l: "HIGH" },
               { s: "OS → Deadlocks", v: 89, l: "HIGH" },
               { s: "DBMS → Normalization", v: 71, l: "MEDIUM" },
               { s: "CN → Routing", v: 32, l: "LOW" },
             ].map((row, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: i < 3 ? `1px solid ${T.line}` : "none" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span>{LEVEL_EMOJI[row.l]}</span>
-                  <span style={{ fontWeight: 600, fontSize: 14.5 }}>{row.s}</span>
+              <div key={i} className="priority-row" style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 18px",
+                borderLeft: `3px solid ${LEVEL_COLOR[row.l]}`, background: i % 2 === 0 ? T.bgSoft ?? "#F5F6F8" : "transparent",
+                borderRadius: 10, marginBottom: i < 3 ? 4 : 0,
+              }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 6 }}>{row.s}</div>
+                  <div style={{ width: 160, height: 5, borderRadius: 999, background: T.line, overflow: "hidden" }}>
+                    <div style={{ width: `${row.v}%`, height: "100%", background: LEVEL_COLOR[row.l], borderRadius: 999 }} />
+                  </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15 }}>{row.v}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18, color: LEVEL_COLOR[row.l], minWidth: 30, textAlign: "right" }}>{row.v}</span>
                   <Badge level={row.l} size="sm" />
                 </div>
               </div>
@@ -828,19 +920,22 @@ function Landing({ onGetStarted, onDemo }) {
           </div>
         </Card>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginTop: 40 }} className="feature-grid">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 18, marginTop: 44 }} className="feature-grid">
           {[
-            { icon: Target, t: "Explainable priority scores", d: "Every score of 0–100 comes with plain-language reasons drawn from your own data." },
-            { icon: CalendarDays, t: "Auto-built revision plan", d: "Your day is scheduled around what matters most, right up to exam day." },
-            { icon: TrendingUp, t: "Feedback loop", d: "Quiz results feed back into your priority scores automatically." },
+            { icon: Target, t: "Explainable priority scores", d: "Every score of 0–100 comes with plain-language reasons drawn from your own data.", c: T.primary, cs: T.primarySoft },
+            { icon: CalendarDays, t: "Auto-built revision plan", d: "Your day is scheduled around what matters most, right up to exam day.", c: T.accent, cs: T.accentSoft ?? "#ECEDFD" },
+            { icon: TrendingUp, t: "Feedback loop", d: "Quiz results feed back into your priority scores automatically.", c: T.low, cs: T.lowSoft },
           ].map((f,i) => (
-            <Card key={i}>
-              <f.icon size={20} color={T.primary} />
-              <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15, marginTop: 12 }}>{f.t}</div>
-              <div style={{ fontSize: 13.5, color: T.muted, marginTop: 6, lineHeight: 1.5 }}>{f.d}</div>
+            <Card key={i} className="feat-card" style={{ border: `1px solid ${T.line}` }}>
+              <div style={{ width: 42, height: 42, borderRadius: 12, background: f.cs, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <f.icon size={20} color={f.c} />
+              </div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15.5, marginTop: 16 }}>{f.t}</div>
+              <div style={{ fontSize: 13.5, color: T.muted, marginTop: 7, lineHeight: 1.55 }}>{f.d}</div>
             </Card>
           ))}
         </div>
+
 
         <div style={{ textAlign: "center", padding: "60px 0 30px", color: T.muted, fontSize: 12.5 }}>
           ReviseAI — a study planning MVP. Priority scores predict revision urgency, not exam outcomes.
@@ -1037,10 +1132,12 @@ function MainArea(props) {
   if (view === "dashboard") return <Dashboard {...props} />;
   if (view === "subjects") return <SubjectsPage {...props} />;
   if (view === "priority") return <PriorityPage {...props} />;
+  if (view === "matrix") return <MatrixPage {...props} />;
   if (view === "addTopic") return <AddTopicPage {...props} />;
   if (view === "topicDetail") return <TopicDetailPage {...props} />;
   if (view === "quiz") return <QuizPage {...props} />;
   if (view === "plan") return <PlanPage {...props} />;
+  if (view === "calendar") return <CalendarPage {...props} />;
   if (view === "quizzes") return <QuizzesHub {...props} />;
   if (view === "analytics") return <AnalyticsPage {...props} />;
   if (view === "insights") return <InsightsPage {...props} />;
@@ -1061,7 +1158,7 @@ function PageHeader({ title, subtitle, right }) {
 }
 
 /* ---------------------------- DASHBOARD ---------------------------- */
-function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, setSelectedTopicId, loading, loadDemoData }) {
+function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, setSelectedTopicId, loading, loadDemoData, streak }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const stats = [
@@ -1069,6 +1166,7 @@ function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, 
     { label: "Topics", value: topics.length, icon: BookOpen, tone: T.primary },
     { label: "High Priority", value: highTopics.length, icon: Flame, tone: T.high },
     { label: "Preparation", value: `${avgPrep}%`, icon: Trophy, tone: T.low },
+    { label: "Study Streak", value: `${streak?.current ?? 0}d`, icon: TrendingUp, tone: T.medium },
   ];
 
   if (topics.length === 0) {
@@ -1094,7 +1192,7 @@ function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, 
         subtitle={`Your next exam is in ${daysUntilExam} day${daysUntilExam===1?"":"s"}. Let's focus on what matters most.`}
         right={<Button icon={Plus} onClick={() => setView("addTopic")}>Add Topic</Button>}
       />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 28 }} className="stat-grid">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 28 }} className="stat-grid">
         {stats.map((s,i) => (
           <Card key={i} style={{ padding: 18 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1247,6 +1345,91 @@ function PriorityPage(props) {
   );
 }
 
+/* ---------------------------- PRIORITY MATRIX ---------------------------- */
+function MatrixPage({ topics, setView, setSelectedTopicId }) {
+  // Two real axes from the student's own data:
+  //   Urgency  = how close the exam is (days until exam)
+  //   Weakness = how weak the topic currently is (priority score)
+  // This keeps the matrix grounded in the same engine as the rest of the
+  // app, rather than introducing a separate unexplained classification.
+  const URGENT_DAYS = 10;
+  const WEAK_SCORE = 55;
+
+  const quadrants = {
+    doFirst: topics.filter(t => t.daysUntilExam <= URGENT_DAYS && t.score >= WEAK_SCORE),
+    schedule: topics.filter(t => t.daysUntilExam > URGENT_DAYS && t.score >= WEAK_SCORE),
+    quickCheck: topics.filter(t => t.daysUntilExam <= URGENT_DAYS && t.score < WEAK_SCORE),
+    later: topics.filter(t => t.daysUntilExam > URGENT_DAYS && t.score < WEAK_SCORE),
+  };
+
+  const cells = [
+    { key: "doFirst", title: "Do First", sub: "Urgent \u00B7 Weak", color: T.high, soft: T.highSoft },
+    { key: "schedule", title: "Schedule", sub: "Not urgent \u00B7 Weak", color: T.medium, soft: T.mediumSoft },
+    { key: "quickCheck", title: "Quick Check", sub: "Urgent \u00B7 Strong", color: T.accent, soft: T.accentSoft ?? "#ECEDFD" },
+    { key: "later", title: "Later", sub: "Not urgent \u00B7 Strong", color: T.low, soft: T.lowSoft },
+  ];
+
+  if (topics.length === 0) {
+    return (
+      <>
+        <PageHeader title="Priority Matrix" subtitle="See your topics plotted by urgency vs. weakness." />
+        <Card><EmptyState icon={LayoutGrid} title="No topics yet" subtitle="Add topics to see them plotted on the matrix." /></Card>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <PageHeader title="Priority Matrix" subtitle="Every topic, plotted by how urgent it is and how weak it currently is." />
+
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 0.5 }}>URGENT (exam within {URGENT_DAYS} days)</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }} className="matrix-grid">
+          {cells.map(c => (
+            <div key={c.key} style={{ background: c.soft, borderRadius: 16, padding: 16, minHeight: 220 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15, color: c.color }}>{c.title}</div>
+                  <div style={{ fontSize: 11, color: T.muted, fontWeight: 600 }}>{c.sub}</div>
+                </div>
+                <div style={{ background: c.color, color: "#fff", borderRadius: 999, minWidth: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, padding: "0 6px" }}>
+                  {quadrants[c.key].length}
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {quadrants[c.key].length === 0 ? (
+                  <div style={{ fontSize: 12, color: T.muted, fontStyle: "italic" }}>Nothing here right now.</div>
+                ) : quadrants[c.key].slice(0, 5).map(t => (
+                  <div
+                    key={t.id}
+                    onClick={() => { setSelectedTopicId(t.id); setView("topicDetail"); }}
+                    style={{ background: "#fff", borderRadius: 10, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${T.line}` }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.subjectName} → {t.name}</div>
+                      <div style={{ fontSize: 10.5, color: T.muted }}>{t.daysUntilExam}d to exam</div>
+                    </div>
+                    <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: c.color }}>{t.score}</span>
+                  </div>
+                ))}
+                {quadrants[c.key].length > 5 && (
+                  <div style={{ fontSize: 11, color: T.muted, fontWeight: 600 }}>+{quadrants[c.key].length - 5} more</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 6 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 0.5 }}>NOT URGENT</span>
+        </div>
+      </div>
+      <style>{`@media (max-width: 700px){ .matrix-grid { grid-template-columns: 1fr !important; } }`}</style>
+    </>
+  );
+}
+
 function MiniStat({ label, value }) {
   return (
     <div style={{ flex: "1 1 70px", minWidth: 64 }}>
@@ -1354,7 +1537,10 @@ function TopicDetailPage({ topics, selectedTopicId, setView, markRevised, delete
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }} className="detail-grid">
         <Card style={{ textAlign: "center" }}>
           <div style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>Priority Score</div>
-          <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 40, color: LEVEL_COLOR[t.level] }}>{t.score}</div>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 40, color: LEVEL_COLOR[t.level] }}>{t.score}<span style={{ fontSize: 16, color: T.muted, fontWeight: 600 }}>/100</span></div>
+          <div style={{ height: 10, borderRadius: 999, background: T.line, overflow: "hidden", margin: "10px 4px 2px" }}>
+            <div style={{ width: `${t.score}%`, height: "100%", background: LEVEL_COLOR[t.level], borderRadius: 999, transition: "width .5s ease" }} />
+          </div>
         </Card>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <StatBox label="Previous Score" value={`${t.marksPercentage}%`} />
@@ -1486,7 +1672,7 @@ function QuizzesHub({ topics, setQuizTopicId, setView }) {
 }
 
 /* ---------------------------- REVISION PLAN ---------------------------- */
-function PlanPage({ topics, setView, setSelectedTopicId, markRevised, showToast }) {
+function PlanPage({ topics, setView, setSelectedTopicId, markRevised, showToast, streak }) {
   const ranked = [...topics].sort((a,b) => b.score - a.score).slice(0, 6);
   const [status, setStatus] = useState({});
   let clock = new Date(); clock.setHours(18,0,0,0);
@@ -1503,7 +1689,15 @@ function PlanPage({ topics, setView, setSelectedTopicId, markRevised, showToast 
 
   return (
     <>
-      <PageHeader title="AI Revision Plan" subtitle="Today's schedule, ranked by priority." />
+      <PageHeader
+        title="AI Revision Plan"
+        subtitle="Today's schedule, ranked by priority."
+        right={streak && streak.current > 0 ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.mediumSoft, color: T.medium, padding: "8px 14px", borderRadius: 999, fontWeight: 700, fontSize: 13 }}>
+            🔥 {streak.current}-day streak {streak.best > streak.current ? `· best ${streak.best}` : ""}
+          </div>
+        ) : null}
+      />
       {sessions.length === 0 ? <Card><EmptyState icon={CalendarDays} title="Nothing scheduled" subtitle="Add topics to generate today's plan." /></Card> : (
         <div style={{ borderLeft: `2px solid ${T.line}`, marginLeft: 8, paddingLeft: 20, display: "grid", gap: 18 }}>
           {sessions.map(s => (
@@ -1538,8 +1732,92 @@ function PlanPage({ topics, setView, setSelectedTopicId, markRevised, showToast 
   );
 }
 
+/* ---------------------------- EXAM CALENDAR ---------------------------- */
+function CalendarPage({ examDate, daysUntilExam, topics, avgPrep, setView, setSelectedTopicId }) {
+  const examD = new Date(examDate);
+  const year = examD.getFullYear();
+  const month = examD.getMonth();
+  const monthLabel = examD.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const startWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const topPriority = [...topics].sort((a, b) => b.score - a.score).slice(0, 5);
+
+  return (
+    <>
+      <PageHeader title="Exam Calendar" subtitle="Your upcoming exam, at a glance." />
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 20 }} className="calendar-grid">
+        <Card>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 16, marginBottom: 14 }}>{monthLabel}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 6, marginBottom: 8 }}>
+            {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+              <div key={i} style={{ textAlign: "center", fontSize: 11, fontWeight: 700, color: T.muted }}>{d}</div>
+            ))}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 6 }}>
+            {cells.map((d, i) => {
+              if (d === null) return <div key={i} />;
+              const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+              const isExam = dateStr === examDate;
+              const isToday = dateStr === todayStr;
+              return (
+                <div key={i} style={{
+                  aspectRatio: "1", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 13, fontWeight: isExam ? 800 : 600,
+                  background: isExam ? T.high : isToday ? T.primarySoft : "transparent",
+                  color: isExam ? "#fff" : isToday ? T.primary : T.ink,
+                  border: isToday && !isExam ? `1.5px solid ${T.primary}` : "none",
+                }}>
+                  {d}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 16, marginTop: 16, fontSize: 11.5, color: T.muted }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: T.high, display: "inline-block" }} /> Exam day</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 10, height: 10, borderRadius: 3, border: `1.5px solid ${T.primary}`, display: "inline-block" }} /> Today</span>
+          </div>
+        </Card>
+
+        <div style={{ display: "grid", gap: 14 }}>
+          <Card>
+            <div style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>Days Remaining</div>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 34, color: T.high }}>{daysUntilExam}</div>
+          </Card>
+          <Card>
+            <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, marginBottom: 8 }}>Syllabus Progress</div>
+            <div style={{ height: 10, borderRadius: 999, background: T.line, overflow: "hidden" }}>
+              <div style={{ width: `${avgPrep}%`, height: "100%", background: avgPrep >= 70 ? T.low : avgPrep >= 40 ? T.medium : T.high, borderRadius: 999 }} />
+            </div>
+            <div style={{ fontSize: 12, marginTop: 6, fontWeight: 700 }}>{avgPrep}% prepared</div>
+          </Card>
+          <Card>
+            <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, marginBottom: 10 }}>Most Important Topics</div>
+            {topPriority.length === 0 ? <div style={{ fontSize: 12, color: T.muted }}>No topics yet.</div> : (
+              <div style={{ display: "grid", gap: 8 }}>
+                {topPriority.map(t => (
+                  <div key={t.id} onClick={() => { setSelectedTopicId(t.id); setView("topicDetail"); }} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t.subjectName} → {t.name}</span>
+                    <Badge level={t.level} size="sm" />
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
+      <style>{`@media (max-width:760px){ .calendar-grid { grid-template-columns: 1fr !important; } }`}</style>
+    </>
+  );
+}
+
 /* ---------------------------- ANALYTICS ---------------------------- */
-function AnalyticsPage({ topics, subjects, avgPrep }) {
+function AnalyticsPage({ topics, subjects, avgPrep, quizHistory }) {
   const subjectData = subjects.map(s => {
     const tps = topics.filter(t => t.subjectId === s.id);
     const prep = tps.length ? Math.round(tps.reduce((a,t)=>a+(100-t.score),0)/tps.length) : 0;
@@ -1551,6 +1829,7 @@ function AnalyticsPage({ topics, subjects, avgPrep }) {
     { level: "LOW", count: topics.filter(t=>t.level==="LOW").length },
   ];
   const scatterData = topics.map(t => ({ x: t.confidenceLevel, y: t.marksPercentage, name: t.name }));
+  const trendData = (quizHistory || []).map((q, i) => ({ attempt: `#${i + 1}`, score: q.scorePercent }));
 
   if (topics.length === 0) return (<><PageHeader title="Analytics" /><Card><EmptyState icon={BarChart3} title="No data yet" subtitle="Add topics to see analytics." /></Card></>);
 
@@ -1602,6 +1881,24 @@ function AnalyticsPage({ topics, subjects, avgPrep }) {
           </ResponsiveContainer>
         </Card>
       </div>
+
+      <Card style={{ marginTop: 16 }}>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Quiz Performance Trend</div>
+        <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 12 }}>Built from your actual quiz attempts — not simulated.</div>
+        {trendData.length === 0 ? (
+          <div style={{ fontSize: 13, color: T.muted, padding: "20px 0", textAlign: "center" }}>Take a quiz to start seeing your trend here.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={180}>
+            <LineChart data={trendData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={T.line} vertical={false} />
+              <XAxis dataKey="attempt" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+              <Tooltip />
+              <Line type="monotone" dataKey="score" stroke={T.accent} strokeWidth={2.5} dot={{ r: 3 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
       <style>{`
         @media (max-width: 760px){ .analytics-top { grid-template-columns: 1fr !important; } .analytics-bottom { grid-template-columns: 1fr !important; } }
       `}</style>
