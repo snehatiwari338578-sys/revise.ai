@@ -42,6 +42,16 @@ function rowToTopic(row, subjectName) {
   };
 }
 
+function rowToQuizAttempt(row, topicNameById) {
+  return {
+    id: row.id,
+    topicId: row.topic_id,
+    topicName: topicNameById[row.topic_id] || "",
+    date: (row.created_at || "").slice(0, 10),
+    scorePercent: row.total_questions ? Math.round((row.score / row.total_questions) * 100) : 0,
+  };
+}
+
 /* ---------- auth ---------- */
 export async function signUp(name, email, password) {
   const { data, error } = await supabase.auth.signUp({
@@ -127,6 +137,12 @@ export async function recordQuizResult(userId, topicId, score, total, incorrect)
     user_id: userId, topic_id: topicId, score, total_questions: total, incorrect_answers: incorrect,
   });
   if (error) throw error;
+}
+
+export async function fetchQuizHistory(userId, topicNameById = {}) {
+  const { data, error } = await supabase.from("quiz_results").select("*").eq("user_id", userId).order("created_at");
+  if (error) throw error;
+  return (data || []).map(row => rowToQuizAttempt(row, topicNameById));
 }
 
 export { supabaseEnabled };

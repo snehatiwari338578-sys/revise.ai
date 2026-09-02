@@ -423,6 +423,8 @@ export default function App() {
           if (subs[0]?.exam_date) setExamDate(subs[0].exam_date);
           setOnboarded(true);
           setView("dashboard");
+          const nameById = Object.fromEntries(tps.map(t => [t.id, `${t.subjectName} → ${t.name}`]));
+          db.fetchQuizHistory(session.user.id, nameById).then(setQuizHistory).catch(err => console.error(err));
         } else {
           setView("onboarding");
         }
@@ -526,6 +528,8 @@ export default function App() {
         if (subs[0]?.exam_date) setExamDate(subs[0].exam_date);
         setOnboarded(true);
         setView("dashboard");
+        const nameById = Object.fromEntries(tps.map(t => [t.id, `${t.subjectName} → ${t.name}`]));
+        db.fetchQuizHistory(authedUser.id, nameById).then(setQuizHistory).catch(err => console.error(err));
       } else {
         setView("onboarding");
       }
