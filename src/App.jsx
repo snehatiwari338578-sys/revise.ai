@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  ScatterChart, Scatter, ZAxis, Legend, LineChart, Line,
+  ScatterChart, Scatter, ZAxis, Legend, LineChart, Line, PieChart, Pie, Cell,
 } from "recharts";
 import {
   Home, BookOpen, Flame, CalendarDays, ClipboardList, BarChart3, Sparkles,
@@ -386,6 +386,11 @@ export default function App() {
   const [subjects, setSubjects] = useState([]);
   const [topics, setTopics] = useState([]);
   const [quizHistory, setQuizHistory] = useState([]); // { id, topicId, topicName, date, scorePercent }
+  const [activityLog, setActivityLog] = useState([]); // { id, icon, text, timestamp }
+
+  const logActivity = useCallback((icon, text) => {
+    setActivityLog(prev => [{ id: uid(), icon, text, timestamp: Date.now() }, ...prev].slice(0, 12));
+  }, []);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [selectedTopicId, setSelectedTopicId] = useState(null);
@@ -621,6 +626,7 @@ export default function App() {
         const saved = await db.createTopic(authUserId, { ...data, subjectId });
         setTopics(prev => recompute([...prev, saved]));
         showToast("Priority calculated and saved");
+        logActivity("plus", `Added new topic: ${data.subjectName} → ${data.name}`);
       } catch (err) {
         console.error(err);
         showToast("Couldn't save this topic — check your connection");
@@ -630,6 +636,7 @@ export default function App() {
     const t = { id: uid(), ...data };
     setTopics(prev => recompute([...prev, t]));
     showToast("Priority calculated");
+    logActivity("plus", `Added new topic: ${data.subjectName} → ${data.name}`);
   }
 
   function updateTopic(id, patch) {
@@ -648,8 +655,10 @@ export default function App() {
   }
 
   function markRevised(id) {
-    updateTopic(id, { lastRevision: new Date().toISOString().slice(0,10), revisionCount: (topics.find(t=>t.id===id)?.revisionCount || 0) + 1 });
+    const t = topics.find(x => x.id === id);
+    updateTopic(id, { lastRevision: new Date().toISOString().slice(0,10), revisionCount: (t?.revisionCount || 0) + 1 });
     showToast("Marked as revised — priority recalculated");
+    if (t) logActivity("flame", `Completed revision: ${t.subjectName} → ${t.name}`);
   }
 
   function submitQuiz(id, correct, total) {
@@ -665,6 +674,7 @@ export default function App() {
       id: uid(), topicId: id, topicName: `${t.subjectName} → ${t.name}`,
       date: new Date().toISOString().slice(0,10), scorePercent: Math.round((correct/total)*100),
     }]);
+    logActivity("quiz", `Attempted quiz: ${t.subjectName} → ${t.name} (${Math.round((correct/total)*100)}%)`);
     if (supabaseEnabled && authUserId) {
       db.recordQuizResult(authUserId, id, correct, total, incorrect).catch(err => console.error(err));
     }
@@ -784,7 +794,7 @@ export default function App() {
               addTopic={addTopic} updateTopic={updateTopic} deleteTopic={deleteTopic} markRevised={markRevised}
               submitQuiz={submitQuiz} loading={loading} loadDemoData={loadDemoData}
               examDate={examDate} setExamDate={setExamDate} showToast={showToast}
-              streak={streak} quizHistory={quizHistory}
+              streak={streak} quizHistory={quizHistory} activityLog={activityLog}
             />
           </div>
         </div>
@@ -1162,15 +1172,15 @@ function PageHeader({ title, subtitle, right }) {
 }
 
 /* ---------------------------- DASHBOARD ---------------------------- */
-function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, setSelectedTopicId, loading, loadDemoData, streak }) {
+function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, subjects, setView, setSelectedTopicId, loading, loadDemoData, streak, activityLog }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const stats = [
-    { label: "Days Until Exam", value: daysUntilExam, icon: CalendarDays, tone: T.accent },
-    { label: "Topics", value: topics.length, icon: BookOpen, tone: T.primary },
-    { label: "High Priority", value: highTopics.length, icon: Flame, tone: T.high },
-    { label: "Preparation", value: `${avgPrep}%`, icon: Trophy, tone: T.low },
-    { label: "Study Streak", value: `${streak?.current ?? 0}d`, icon: TrendingUp, tone: T.medium },
+    { label: "Days Until Exam", value: daysUntilExam, icon: CalendarDays, tone: T.accent, soft: T.accentSoft ?? "#ECEDFD", note: daysUntilExam === 0 ? "Exam day is here!" : "Countdown running" },
+    { label: "Topics", value: topics.length, icon: BookOpen, tone: T.primary, soft: T.primarySoft, note: "Total topics" },
+    { label: "High Priority", value: highTopics.length, icon: Flame, tone: T.high, soft: T.highSoft, note: highTopics.length > 0 ? "Needs your focus" : "All clear" },
+    { label: "Preparation", value: `${avgPrep}%`, icon: Trophy, tone: T.low, soft: T.lowSoft, note: "Overall progress" },
+    { label: "Study Streak", value: `${streak?.current ?? 0}d`, icon: TrendingUp, tone: T.medium, soft: T.mediumSoft, note: (streak?.current ?? 0) > 0 ? "Keep it going!" : "Start today" },
   ];
 
   if (topics.length === 0) {
@@ -1189,6 +1199,52 @@ function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, 
     );
   }
 
+  // Today's Plan — top 3 ranked topics, scheduled sequentially from 9 AM.
+  let clock = new Date(); clock.setHours(9, 0, 0, 0);
+  const planSessions = [...topics].sort((a,b) => b.score - a.score).slice(0, 3).map(t => {
+    const durationMin = t.level === "HIGH" ? 60 : t.level === "MEDIUM" ? 60 : 45;
+    const start = new Date(clock);
+    const end = new Date(clock.getTime() + durationMin * 60000);
+    clock = new Date(end.getTime() + 15 * 60000);
+    return { t, start, end };
+  });
+  const fmtTime = d => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  // Priority Overview donut
+  const dist = [
+    { key: "HIGH", label: "High Priority", count: topics.filter(t => t.level === "HIGH").length, color: T.high },
+    { key: "MEDIUM", label: "Medium Priority", count: topics.filter(t => t.level === "MEDIUM").length, color: T.medium },
+    { key: "LOW", label: "Low Priority", count: topics.filter(t => t.level === "LOW").length, color: T.low },
+  ];
+  const donutData = dist.filter(d => d.count > 0);
+
+  // Subject-wise progress
+  const palette = [T.primary, T.medium, T.accent, T.high, T.low];
+  const subjectRows = (subjects || []).map((s, i) => {
+    const tps = topics.filter(t => t.subjectId === s.id);
+    const prep = tps.length ? Math.round(tps.reduce((a, t) => a + (100 - t.score), 0) / tps.length) : 0;
+    return { name: s.name, prep, color: palette[i % palette.length] };
+  });
+
+  const ACTIVITY_ICON = { plus: BookOpen, flame: Flame, quiz: ClipboardList, matrix: LayoutGrid };
+  function timeAgo(ts) {
+    const mins = Math.round((Date.now() - ts) / 60000);
+    if (mins < 1) return "Just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.round(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.round(hrs / 24)}d ago`;
+  }
+
+  // Single strongest AI insight for the banner
+  let topInsight = null;
+  const weakest = [...topics].sort((a, b) => b.score - a.score)[0];
+  if (weakest && weakest.level === "HIGH") {
+    topInsight = `Focus on ${weakest.subjectName} → ${weakest.name} — it's your highest-priority topic right now.`;
+  } else if (highTopics.length === 0) {
+    topInsight = "Nothing urgent on your plate — good time to reinforce medium-priority topics.";
+  }
+
   return (
     <>
       <PageHeader
@@ -1196,31 +1252,147 @@ function Dashboard({ user, daysUntilExam, topics, highTopics, avgPrep, setView, 
         subtitle={`Your next exam is in ${daysUntilExam} day${daysUntilExam===1?"":"s"}. Let's focus on what matters most.`}
         right={<Button icon={Plus} onClick={() => setView("addTopic")}>Add Topic</Button>}
       />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 28 }} className="stat-grid">
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 20 }} className="stat-grid">
         {stats.map((s,i) => (
           <Card key={i} style={{ padding: 18 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 38, height: 38, borderRadius: 11, background: s.soft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <s.icon size={18} color={s.tone} />
+              </div>
               <span style={{ fontSize: 12.5, color: T.muted, fontWeight: 600 }}>{s.label}</span>
-              <s.icon size={16} color={s.tone} />
             </div>
-            <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 30, marginTop: 6 }}>{s.value}</div>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 28, marginTop: 10 }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: s.tone, fontWeight: 700, marginTop: 2 }}>{s.note}</div>
           </Card>
         ))}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 17, display: "flex", alignItems: "center", gap: 8 }}>
-          🔥 Revise First
-        </div>
-        <span style={{ fontSize: 13, color: T.primary, fontWeight: 600, cursor: "pointer" }} onClick={() => setView("priority")}>View all →</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginBottom: 16 }} className="dash-row">
+        {/* Today's Plan */}
+        <Card>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15.5 }}>📋 Today's Plan</div>
+              <div style={{ fontSize: 11.5, color: T.muted }}>Your personalized plan for today</div>
+            </div>
+            <span style={{ fontSize: 12.5, color: T.primary, fontWeight: 700, cursor: "pointer" }} onClick={() => setView("plan")}>View full plan →</span>
+          </div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {planSessions.map((s, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, background: T.bgSoft ?? "#F5F6F8" }}>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, width: 110, flexShrink: 0 }}>{fmtTime(s.start)} – {fmtTime(s.end)}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.t.subjectName} – {s.t.name}</div>
+                  <div style={{ marginTop: 3 }}><Badge level={s.t.level} size="sm" /></div>
+                </div>
+                <Button style={{ padding: "7px 14px", fontSize: 12 }} variant={i === 0 ? "primary" : "ghost"} onClick={() => { setSelectedTopicId(s.t.id); setView("topicDetail"); }}>Start</Button>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, background: T.primarySoft, color: T.primary, borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600 }}>
+            ✨ You have {planSessions.length} study session{planSessions.length !== 1 ? "s" : ""} planned for today.
+          </div>
+        </Card>
+
+        {/* Priority Overview donut */}
+        <Card>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15.5 }}>🎯 Priority Overview</div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 6 }}>Distribution of topics by priority</div>
+          <div style={{ position: "relative" }}>
+            <ResponsiveContainer width="100%" height={190}>
+              <PieChart>
+                <Pie data={donutData} dataKey="count" nameKey="label" innerRadius={55} outerRadius={80} paddingAngle={3}>
+                  {donutData.map((d, i) => <Cell key={i} fill={d.color} stroke="none" />)}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+            <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", textAlign: "center", pointerEvents: "none" }}>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 22 }}>{topics.length}</div>
+              <div style={{ fontSize: 10, color: T.muted, fontWeight: 700 }}>Topics</div>
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {dist.map(d => (
+              <div key={d.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: d.color, display: "inline-block" }} /> {d.label}
+                </span>
+                <span style={{ fontWeight: 700 }}>{topics.length ? Math.round((d.count / topics.length) * 100) : 0}% · {d.count}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
-        {highTopics.slice(0,5).map(t => (
-          <TopicMiniCard key={t.id} t={t} onClick={() => { setSelectedTopicId(t.id); setView("topicDetail"); }} onStart={() => { setSelectedTopicId(t.id); setView("topicDetail"); }} />
-        ))}
-        {highTopics.length === 0 && <Card><EmptyState icon={CheckCircle2} title="Nothing urgent" subtitle="No high-priority topics right now — nice work." /></Card>}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }} className="dash-row">
+        {/* Subject Wise Progress */}
+        <Card>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15.5, marginBottom: 2 }}>📊 Subject Wise Progress</div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>Overall progress by subject</div>
+          {subjectRows.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: T.muted }}>No subjects yet.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 12 }}>
+              {subjectRows.map((s, i) => (
+                <div key={i}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>
+                    <span>{s.name}</span>
+                    <span>{s.prep}%</span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 999, background: T.line, overflow: "hidden" }}>
+                    <div style={{ width: `${s.prep}%`, height: "100%", background: s.color, borderRadius: 999 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        {/* Recent Activity */}
+        <Card>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15.5 }}>🕒 Recent Activity</div>
+            {activityLog?.length > 0 && <span style={{ fontSize: 12, color: T.primary, fontWeight: 700, cursor: "pointer" }} onClick={() => setView("insights")}>View all →</span>}
+          </div>
+          {(!activityLog || activityLog.length === 0) ? (
+            <div style={{ fontSize: 12.5, color: T.muted }}>Nothing yet — add a topic or take a quiz to see activity here.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {activityLog.slice(0, 5).map(a => {
+                const Icon = ACTIVITY_ICON[a.icon] || Sparkles;
+                return (
+                  <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 9, background: T.primarySoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon size={14} color={T.primary} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.text}</div>
+                    <div style={{ fontSize: 10.5, color: T.muted, flexShrink: 0 }}>{timeAgo(a.timestamp)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
       </div>
-      <style>{`@media (max-width: 760px){ .stat-grid { grid-template-columns: repeat(2,1fr) !important; } }`}</style>
+
+      {topInsight && (
+        <Card style={{ background: T.primarySoft, border: "none", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <Sparkles size={18} color={T.primary} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5, color: T.ink }}>AI Insight</div>
+              <div style={{ fontSize: 12.5, color: T.ink, marginTop: 2 }}>{topInsight}</div>
+            </div>
+          </div>
+          <Button variant="ghost" style={{ background: "#fff" }} onClick={() => setView("insights")}>View Insights</Button>
+        </Card>
+      )}
+
+      <style>{`
+        @media (max-width: 760px){ .stat-grid { grid-template-columns: repeat(2,1fr) !important; } .dash-row { grid-template-columns: 1fr !important; } }
+      `}</style>
     </>
   );
 }
